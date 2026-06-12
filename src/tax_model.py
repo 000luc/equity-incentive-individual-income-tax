@@ -227,10 +227,14 @@ def installment_status(
     deadline: date,
     departure_date: date | None = None,
     as_of_date: date | None = None,
+    tax_batch_id: str | None = None,
 ) -> dict[str, Any]:
     event_id = str(event_id).strip()
     if not event_id:
         raise ValueError("事件编号不能为空")
+    tax_batch_id = str(tax_batch_id or "").strip()
+    if not tax_batch_id:
+        raise ValueError("税额批次编号不能为空")
     tax = _decimal(incremental_tax, "本批次新增税额")
     if tax < 0:
         raise ValueError("本批次新增税额不得为负数")
@@ -247,6 +251,8 @@ def installment_status(
     paid = Decimal("0")
     paid_by_departure = Decimal("0")
     has_late_payment = False
+    invalid_payment_count = 0
+    warnings = []
     for index, payment in enumerate(payments, start=1):
         if not isinstance(payment, dict):
             raise ValueError(f"第{index}笔缴税记录必须是字典")
@@ -254,8 +260,19 @@ def installment_status(
         linked_batch = str(payment.get("tax_batch_id", "")).strip()
         if not linked_event and not linked_batch:
             raise ValueError("每笔缴税必须关联事件编号或税额批次")
+        mismatch_messages = []
         if linked_event and linked_event != event_id:
-            raise ValueError(f"第{index}笔缴税关联的事件编号与事件{event_id}不一致")
+            mismatch_messages.append(
+                f"关联事件{linked_event}与目标事件{event_id}不一致"
+            )
+        if linked_batch and linked_batch != tax_batch_id:
+            mismatch_messages.append(
+                f"关联税额批次{linked_batch}与目标批次{tax_batch_id}不一致"
+            )
+        if mismatch_messages:
+            invalid_payment_count += 1
+            warnings.append(f"第{index}笔缴税{'；'.join(mismatch_messages)}，未计入")
+            continue
         payment_date = payment.get("payment_date")
         if not isinstance(payment_date, date):
             raise ValueError(f"第{index}笔缴税日期必须是date类型")
@@ -278,7 +295,6 @@ def installment_status(
         if departure_date is not None
         else Decimal("0")
     )
-    warnings = []
     if overpaid > 0:
         warnings.append(f"事件{event_id}累计缴税超过本批次新增税额{_money(overpaid):.2f}元")
     if has_late_payment:
@@ -295,11 +311,14 @@ def installment_status(
 
     return {
         "event_id": event_id,
+        "tax_batch_id": tax_batch_id,
         "incremental_tax": tax,
         "paid": paid,
         "remaining": _money(remaining),
         "is_overpaid": overpaid > 0,
         "is_overdue": has_late_payment or unpaid_overdue,
         "departure_unpaid": departure_remaining > 0,
+        "has_invalid_payments": invalid_payment_count > 0,
+        "invalid_payment_count": invalid_payment_count,
         "warnings": warnings,
     }

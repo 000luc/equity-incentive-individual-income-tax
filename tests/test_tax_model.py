@@ -158,6 +158,7 @@ def test_installment_status_requires_event_or_tax_batch_link():
             incremental_tax="1000",
             payments=[{"payment_date": date(2026, 1, 1), "amount": "100"}],
             deadline=date(2027, 1, 1),
+            tax_batch_id="E1-TAX",
         )
 
 
@@ -174,6 +175,7 @@ def test_installment_status_flags_overpayment_and_late_payment():
             }
         ],
         deadline=date(2027, 1, 1),
+        tax_batch_id="E1-TAX",
     )
 
     assert result["paid"] == Decimal("1100.00")
@@ -197,6 +199,7 @@ def test_installment_status_flags_departure_with_unpaid_tax():
         ],
         deadline=date(2028, 6, 30),
         departure_date=date(2026, 6, 30),
+        tax_batch_id="E2-TAX",
     )
 
     assert result["remaining"] == Decimal("600.00")
@@ -211,8 +214,77 @@ def test_installment_status_flags_unpaid_balance_after_deadline():
         payments=[],
         deadline=date(2027, 1, 31),
         as_of_date=date(2027, 2, 1),
+        tax_batch_id="E3-TAX",
     )
 
     assert result["remaining"] == Decimal("1000.00")
     assert result["is_overdue"] is True
     assert "事件E3截至2027-02-01已逾期且仍有未缴税额1000.00元" in result["warnings"]
+
+
+def test_installment_status_excludes_payment_with_only_wrong_tax_batch():
+    result = installment_status(
+        event_id="E4",
+        tax_batch_id="E4-TAX",
+        incremental_tax="1000",
+        payments=[
+            {
+                "tax_batch_id": "OTHER-TAX",
+                "payment_date": date(2026, 1, 1),
+                "amount": "400",
+            }
+        ],
+        deadline=date(2028, 1, 1),
+    )
+
+    assert result["paid"] == Decimal("0.00")
+    assert result["remaining"] == Decimal("1000.00")
+    assert result["has_invalid_payments"] is True
+    assert result["invalid_payment_count"] == 1
+    assert "第1笔缴税关联税额批次OTHER-TAX与目标批次E4-TAX不一致，未计入" in result["warnings"]
+
+
+def test_installment_status_excludes_matching_event_with_wrong_tax_batch():
+    result = installment_status(
+        event_id="E5",
+        tax_batch_id="E5-TAX",
+        incremental_tax="1000",
+        payments=[
+            {
+                "event_id": "E5",
+                "tax_batch_id": "OTHER-TAX",
+                "payment_date": date(2026, 1, 1),
+                "amount": "600",
+            }
+        ],
+        deadline=date(2028, 1, 1),
+    )
+
+    assert result["paid"] == Decimal("0.00")
+    assert result["remaining"] == Decimal("1000.00")
+    assert result["has_invalid_payments"] is True
+    assert result["invalid_payment_count"] == 1
+    assert "第1笔缴税关联税额批次OTHER-TAX与目标批次E5-TAX不一致，未计入" in result["warnings"]
+
+
+def test_installment_status_counts_payment_when_event_and_batch_both_match():
+    result = installment_status(
+        event_id="E6",
+        tax_batch_id="E6-TAX",
+        incremental_tax="1000",
+        payments=[
+            {
+                "event_id": "E6",
+                "tax_batch_id": "E6-TAX",
+                "payment_date": date(2026, 1, 1),
+                "amount": "600",
+            }
+        ],
+        deadline=date(2028, 1, 1),
+    )
+
+    assert result["paid"] == Decimal("600.00")
+    assert result["remaining"] == Decimal("400.00")
+    assert result["has_invalid_payments"] is False
+    assert result["invalid_payment_count"] == 0
+    assert result["warnings"] == []
