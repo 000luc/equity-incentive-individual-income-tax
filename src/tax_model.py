@@ -3,8 +3,8 @@ from __future__ import annotations
 import calendar
 from collections import defaultdict
 from datetime import date
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Any
+from decimal import Decimal, DecimalException, InvalidOperation, ROUND_HALF_UP
+from typing import Any, Callable
 
 
 CENT = Decimal("0.01")
@@ -35,8 +35,18 @@ def _decimal(value: Any, field_name: str) -> Decimal:
 def _money(value: Decimal, field_name: str = "金额") -> Decimal:
     try:
         return value.quantize(CENT, rounding=ROUND_HALF_UP)
-    except InvalidOperation:
+    except DecimalException:
         raise ValueError(f"{field_name}超出可计算范围") from None
+
+
+def _calculate(field_name: str, operation: Callable[[], Decimal]) -> Decimal:
+    try:
+        result = operation()
+    except DecimalException:
+        raise ValueError(f"{field_name}超出可计算范围") from None
+    if not result.is_finite():
+        raise ValueError(f"{field_name}超出可计算范围")
+    return result
 
 
 def _identifier(value: Any, field_name: str) -> str:
@@ -67,7 +77,7 @@ def option_income(
     if qty <= 0:
         raise ValueError("行权数量必须大于0")
 
-    income = (market - exercise) * qty
+    income = _calculate("股票期权所得", lambda: (market - exercise) * qty)
     if income < 0:
         return ZERO, ["股票期权所得为负，已按0处理"]
     return _money(income), []
@@ -99,9 +109,12 @@ def restricted_stock_income(
     if employee_paid < 0:
         raise ValueError("员工实际出资总额不得为负数")
 
-    income = (
-        (registration + unlock) / Decimal("2") * unlock_qty
-        - employee_paid * unlock_qty / employee_total
+    income = _calculate(
+        "限制性股票所得",
+        lambda: (
+            (registration + unlock) / Decimal("2") * unlock_qty
+            - employee_paid * unlock_qty / employee_total
+        ),
     )
     if income < 0:
         return ZERO, ["限制性股票所得为负，已按0处理"]
@@ -115,7 +128,10 @@ def annual_tax(taxable_income: Any) -> dict[str, Decimal]:
 
     for ceiling, rate, quick_deduction in TAX_BRACKETS:
         if ceiling is None or income <= ceiling:
-            tax = max(income * rate - quick_deduction, Decimal("0"))
+            tax = _calculate(
+                "应纳税额",
+                lambda: max(income * rate - quick_deduction, Decimal("0")),
+            )
             return {
                 "taxable_income": _money(income, "应纳税所得额"),
                 "rate": rate,
@@ -133,7 +149,9 @@ def incremental_event_tax(
     if previous < 0:
         raise ValueError("此前累计已确认税额不得为负数")
     previous = _money(previous)
-    incremental = cumulative["tax"] - previous
+    incremental = _calculate(
+        "本次新增应纳税额", lambda: cumulative["tax"] - previous
+    )
     if incremental < 0:
         raise ValueError("此前累计已确认税额不得超过本次后年度累计税额")
     return {
@@ -216,7 +234,10 @@ def event_tax_batches(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         tax_year = event["event_date"].year
         key = (event["employee_id"], tax_year)
         previous_tax = confirmed_tax[key]
-        cumulative_income[key] += event["income"]
+        cumulative_income[key] = _calculate(
+            "年度累计所得额",
+            lambda: cumulative_income[key] + event["income"],
+        )
         tax_result = incremental_event_tax(cumulative_income[key], previous_tax)
         confirmed_tax[key] = tax_result["cumulative_tax"]
         batches.append(
@@ -292,19 +313,24 @@ def installment_status(
             raise ValueError(f"第{index}笔缴税金额必须大于0")
         if payment_date > check_date:
             continue
-        paid += amount
+        paid = _calculate("累计已缴税额", lambda: paid + amount)
         if payment_date > deadline:
             has_late_payment = True
         if departure_date is None or payment_date <= departure_date:
-            paid_by_departure += amount
+            paid_by_departure = _calculate(
+                "离职时累计已缴税额", lambda: paid_by_departure + amount
+            )
 
     paid = _money(paid)
-    overpaid = max(paid - tax, Decimal("0"))
-    remaining = max(tax - paid, Decimal("0"))
+    overpaid = _calculate("超额缴税额", lambda: max(paid - tax, Decimal("0")))
+    remaining = _calculate("未缴税额", lambda: max(tax - paid, Decimal("0")))
     unpaid_overdue = check_date > deadline and remaining > 0
     departure_remaining = (
-        max(tax - _money(paid_by_departure), Decimal("0"))
-        if departure_date is not None
+        _calculate(
+            "离职时未缴税额",
+            lambda: max(tax - _money(paid_by_departure), Decimal("0")),
+        )
+        if departure_date is not None and check_date >= departure_date
         else Decimal("0")
     )
     if overpaid > 0:

@@ -45,6 +45,28 @@ def test_restricted_stock_income_rejects_company_total_as_invalid_denominator():
         )
 
 
+@pytest.mark.parametrize(
+    ("function", "args", "message"),
+    [
+        (
+            option_income,
+            ("1e999999", "0", "10"),
+            "股票期权所得超出可计算范围",
+        ),
+        (
+            restricted_stock_income,
+            ("1e999999", "1e999999", "10", "10", "0"),
+            "限制性股票所得超出可计算范围",
+        ),
+    ],
+)
+def test_income_calculations_convert_decimal_overflow_to_value_error(
+    function, args, message
+):
+    with pytest.raises(ValueError, match=message):
+        function(*args)
+
+
 def test_annual_tax_uses_decimal_and_rounds_to_cents():
     result = annual_tax("162000.03")
 
@@ -259,6 +281,7 @@ def test_installment_status_flags_departure_with_unpaid_tax():
         ],
         deadline=date(2028, 6, 30),
         departure_date=date(2026, 6, 30),
+        as_of_date=date(2026, 6, 30),
         tax_batch_id="E2-TAX",
     )
 
@@ -399,6 +422,22 @@ def test_installment_status_counts_payment_on_departure_date():
     assert result["paid"] == Decimal("1000.00")
     assert result["remaining"] == Decimal("0.00")
     assert result["departure_unpaid"] is False
+
+
+def test_installment_status_does_not_warn_before_future_departure_date():
+    result = installment_status(
+        event_id="E9",
+        tax_batch_id="E9-TAX",
+        incremental_tax="1000",
+        payments=[],
+        deadline=date(2028, 1, 1),
+        departure_date=date(2026, 7, 1),
+        as_of_date=date(2026, 6, 30),
+    )
+
+    assert result["remaining"] == Decimal("1000.00")
+    assert result["departure_unpaid"] is False
+    assert not any("离职前仍有未缴税额" in warning for warning in result["warnings"])
 
 
 @pytest.mark.parametrize(
