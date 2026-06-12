@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 依据广电计量正式公告和现行个人所得税政策，生成可批量管理、年度合并计税、自定义36个月缴税及单人查询的可靠 Excel 工作簿。
+**Goal:** 依据广电计量正式公告和现行个人所得税政策，生成可批量管理、年度累计合并计税、事件新增税额独立计算36个月期限、自定义缴税及单人查询的可靠 Excel 工作簿。
 
 **Architecture:** 先建立可追溯的公告与政策参数清单，再用独立 Python 计算模块固化税务计算和校验规则，最后由工作簿生成器创建公式、验证、样式和保护。测试既验证 Python 计算结果，也直接检查 XLSX 内部结构、公式和交付文件。
 
@@ -71,9 +71,12 @@ git commit -m "docs: verify equity incentive announcements and tax rules"
 - 5万份期权、行权价14.56元、行权日价17.80元，所得额162,000元；
 - 限制性股票公式必须分别使用登记日价、解禁日价、解禁数量、总获授数量和实际出资；
 - 同一员工同年多次事件合并后只适用一次税率和速算扣除数；
+- 同年后续事件新增税额等于本次后年度累计税额减此前事件累计已确认税额；
 - 跨年度事件分别计税；
 - 负所得按零归集并返回警告；
 - 36个月截止日正确处理月末；
+- 同一员工同年度两次事件分别从各自纳税义务发生日起计算36个月，第二次事件不得沿用第一次事件截止日；
+- 分期记录必须关联事件编号或新增税额批次，并按该批次税额和期限校验；
 - 超额缴税、逾期和离职未缴清返回异常。
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -92,11 +95,12 @@ Expected: 因 `src.tax_model` 尚不存在而失败。
 def option_income(market_price: float, exercise_price: float, quantity: float) -> tuple[float, list[str]]
 def restricted_stock_income(registration_price: float, unlock_price: float, unlock_quantity: float, total_granted: float, total_paid: float) -> tuple[float, list[str]]
 def annual_tax(taxable_income: float) -> dict[str, float]
+def event_tax_batches(events: list[dict]) -> list[dict]
 def add_months(value: date, months: int) -> date
-def installment_status(tax_due: float, payments: list[dict], deadline: date, departure_date: date | None = None) -> dict
+def installment_status(event_id: str, incremental_tax: float, payments: list[dict], deadline: date, departure_date: date | None = None) -> dict
 ```
 
-使用 `Decimal` 进行金额计算并按分四舍五入。参数缺失或数量非法时抛出明确异常。
+`event_tax_batches` 按员工、纳税年度、事件日期和事件编号稳定排序，逐笔返回年度累计所得、年度累计税额、此前累计已确认税额、本次新增税额、纳税义务发生日和事件级36个月最晚缴清日。使用 `Decimal` 进行金额计算并按分四舍五入。参数缺失或数量非法时抛出明确异常。
 
 - [ ] **Step 4: 运行测试确认通过**
 
@@ -141,8 +145,11 @@ git commit -m "feat: add equity incentive tax calculation model"
 - 事件明细包含设计文档规定字段和至少500行可录入空间；
 - 计划、权益类型和员工编号有下拉验证；
 - 公式列已填充到预留行；
-- 年度汇总按员工编号和年度合并；
-- 分期台账允许自定义日期及金额；
+- 事件明细逐笔计算年度累计税额、本次新增税额和事件级36个月最晚缴清日；
+- 年度汇总按员工编号和年度合并，并仅将最早到期日作为预警字段；
+- 同一员工同年度两次事件分别起算36个月，两个截止日均正确；
+- 分期台账允许自定义日期及金额，且每行必须关联事件编号或新增税额批次；
+- 分期台账按所关联事件批次校验新增税额上限和最晚缴清日；
 - 税率表和公式单元格受保护；
 - 冻结窗格、筛选、打印设置存在；
 - 不存在无说明隐藏试算表；
@@ -164,6 +171,8 @@ Expected: 因生成器和目标工作簿不存在而失败。
 - 使用 Excel 兼容公式，避免依赖新版动态数组函数；
 - 使用蓝色表示输入、灰色表示内置参数、绿色表示公式、红色表示异常；
 - 用 Excel 表格、数据验证、条件格式、冻结窗格和保护实现可维护模板；
+- 事件明细按员工、年度、事件日期和事件编号计算累计年度税额及本次新增税额，并为每个事件生成独立最晚缴清日；
+- 分期台账通过事件编号或新增税额批次关联事件明细，不使用年度最早事件日期统一期限；
 - 加入旧表5万份期权及5万股限制性股票演示案例，员工编号使用 `DEMO001`；
 - 设置自动重算模式；
 - 保存到项目根目录，绝不覆盖原始文件。
@@ -214,6 +223,9 @@ Expected: 全部通过。
 重新读取公式和值，检查：
 
 - 所有演示结果与 Python 手工计算一致；
+- 同一员工同年度两次事件的年度累计税额连续衔接，本次新增税额之和等于年度应纳税额；
+- 两次事件分别从各自纳税义务发生日起计算36个月，分期台账关联正确事件批次；
+- 年度汇总最早到期日仅用于提示，没有覆盖事件级截止日；
 - 没有公式错误；
 - 保护、验证、筛选和冻结窗格仍存在；
 - 原始文件哈希未变化。
@@ -226,6 +238,7 @@ Expected: 全部通过。
 - 新版工作表及使用方法；
 - 公告参数和政策来源；
 - 演示数据复算结果；
+- 同年度累计计税、事件新增税额差额计算和事件级36个月期限验证结果；
 - 自动测试、实机重算及残余限制。
 
 - [ ] **Step 5: 提交**
