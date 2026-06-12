@@ -32,8 +32,26 @@ def _decimal(value: Any, field_name: str) -> Decimal:
     return result
 
 
-def _money(value: Decimal) -> Decimal:
-    return value.quantize(CENT, rounding=ROUND_HALF_UP)
+def _money(value: Decimal, field_name: str = "金额") -> Decimal:
+    try:
+        return value.quantize(CENT, rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        raise ValueError(f"{field_name}超出可计算范围") from None
+
+
+def _identifier(value: Any, field_name: str) -> str:
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"{field_name}不能为空")
+    result = str(value).strip()
+    if not result:
+        raise ValueError(f"{field_name}不能为空")
+    return result
+
+
+def _optional_identifier(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def option_income(
@@ -99,10 +117,10 @@ def annual_tax(taxable_income: Any) -> dict[str, Decimal]:
         if ceiling is None or income <= ceiling:
             tax = max(income * rate - quick_deduction, Decimal("0"))
             return {
-                "taxable_income": _money(income),
+                "taxable_income": _money(income, "应纳税所得额"),
                 "rate": rate,
                 "quick_deduction": _money(quick_deduction),
-                "tax": _money(tax),
+                "tax": _money(tax, "应纳税额"),
             }
     raise RuntimeError("无法匹配税率")
 
@@ -155,15 +173,11 @@ def event_tax_batches(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for field in ("event_id", "employee_id", "event_date", "income"):
             if field not in event:
                 raise ValueError(f"事件缺少必填字段：{field}")
-        event_id = str(event["event_id"]).strip()
-        employee_id = str(event["employee_id"]).strip()
+        event_id = _identifier(event["event_id"], "事件编号")
+        employee_id = _identifier(event["employee_id"], "员工编号")
         event_date = event["event_date"]
-        if not event_id:
-            raise ValueError("事件编号不能为空")
         if event_id in seen_event_ids:
             raise ValueError(f"事件编号重复：{event_id}")
-        if not employee_id:
-            raise ValueError("员工编号不能为空")
         if not isinstance(event_date, date):
             raise ValueError(f"事件{event_id}的事件日期必须是date类型")
         income = _decimal(event["income"], f"事件{event_id}所得额")
@@ -229,12 +243,8 @@ def installment_status(
     as_of_date: date | None = None,
     tax_batch_id: str | None = None,
 ) -> dict[str, Any]:
-    event_id = str(event_id).strip()
-    if not event_id:
-        raise ValueError("事件编号不能为空")
-    tax_batch_id = str(tax_batch_id or "").strip()
-    if not tax_batch_id:
-        raise ValueError("税额批次编号不能为空")
+    event_id = _identifier(event_id, "事件编号")
+    tax_batch_id = _identifier(tax_batch_id, "税额批次编号")
     tax = _decimal(incremental_tax, "本批次新增税额")
     if tax < 0:
         raise ValueError("本批次新增税额不得为负数")
@@ -247,6 +257,7 @@ def installment_status(
         raise ValueError("离职日期必须是date类型")
     if as_of_date is not None and not isinstance(as_of_date, date):
         raise ValueError("检查日期必须是date类型")
+    check_date = as_of_date or date.today()
 
     paid = Decimal("0")
     paid_by_departure = Decimal("0")
@@ -256,8 +267,8 @@ def installment_status(
     for index, payment in enumerate(payments, start=1):
         if not isinstance(payment, dict):
             raise ValueError(f"第{index}笔缴税记录必须是字典")
-        linked_event = str(payment.get("event_id", "")).strip()
-        linked_batch = str(payment.get("tax_batch_id", "")).strip()
+        linked_event = _optional_identifier(payment.get("event_id"))
+        linked_batch = _optional_identifier(payment.get("tax_batch_id"))
         if not linked_event and not linked_batch:
             raise ValueError("每笔缴税必须关联事件编号或税额批次")
         mismatch_messages = []
@@ -279,16 +290,17 @@ def installment_status(
         amount = _decimal(payment.get("amount"), f"第{index}笔缴税金额")
         if amount <= 0:
             raise ValueError(f"第{index}笔缴税金额必须大于0")
+        if payment_date > check_date:
+            continue
         paid += amount
         if payment_date > deadline:
             has_late_payment = True
-        if departure_date is None or payment_date < departure_date:
+        if departure_date is None or payment_date <= departure_date:
             paid_by_departure += amount
 
     paid = _money(paid)
     overpaid = max(paid - tax, Decimal("0"))
     remaining = max(tax - paid, Decimal("0"))
-    check_date = as_of_date or date.today()
     unpaid_overdue = check_date > deadline and remaining > 0
     departure_remaining = (
         max(tax - _money(paid_by_departure), Decimal("0"))

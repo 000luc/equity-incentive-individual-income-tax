@@ -56,6 +56,40 @@ def test_annual_tax_uses_decimal_and_rounds_to_cents():
     }
 
 
+def test_annual_tax_rounds_exact_half_cent_up():
+    assert annual_tax("0.50")["tax"] == Decimal("0.02")
+
+
+@pytest.mark.parametrize(
+    ("income", "rate", "quick_deduction", "tax"),
+    [
+        ("36000", "0.03", "0.00", "1080.00"),
+        ("36000.01", "0.10", "2520.00", "1080.00"),
+        ("144000", "0.10", "2520.00", "11880.00"),
+        ("144000.01", "0.20", "16920.00", "11880.00"),
+        ("300000", "0.20", "16920.00", "43080.00"),
+        ("300000.01", "0.25", "31920.00", "43080.00"),
+        ("420000", "0.25", "31920.00", "73080.00"),
+        ("420000.01", "0.30", "52920.00", "73080.00"),
+        ("660000", "0.30", "52920.00", "145080.00"),
+        ("660000.01", "0.35", "85920.00", "145080.00"),
+        ("960000", "0.35", "85920.00", "250080.00"),
+        ("960000.01", "0.45", "181920.00", "250080.00"),
+    ],
+)
+def test_annual_tax_bracket_boundaries(income, rate, quick_deduction, tax):
+    result = annual_tax(income)
+
+    assert result["rate"] == Decimal(rate)
+    assert result["quick_deduction"] == Decimal(quick_deduction)
+    assert result["tax"] == Decimal(tax)
+
+
+def test_annual_tax_rejects_amount_too_large_to_round():
+    with pytest.raises(ValueError, match="应纳税所得额超出可计算范围"):
+        annual_tax("1e999999")
+
+
 def test_incremental_event_tax_uses_one_cumulative_quick_deduction():
     first = incremental_event_tax("100000", "0")
     second = incremental_event_tax("162000", first["cumulative_tax"])
@@ -103,6 +137,31 @@ def test_event_tax_batches_merge_same_year_but_separate_different_years():
     assert batches[2]["cumulative_income"] == Decimal("62000.00")
     assert batches[2]["incremental_tax"] == Decimal("3680.00")
     assert batches[2]["deadline"] == date(2029, 2, 28)
+
+
+@pytest.mark.parametrize(
+    ("event_id", "employee_id", "message"),
+    [
+        (None, "A001", "事件编号不能为空"),
+        ("   ", "A001", "事件编号不能为空"),
+        ("E1", None, "员工编号不能为空"),
+        ("E1", "   ", "员工编号不能为空"),
+    ],
+)
+def test_event_tax_batches_rejects_empty_identifiers(
+    event_id, employee_id, message
+):
+    with pytest.raises(ValueError, match=message):
+        event_tax_batches(
+            [
+                {
+                    "event_id": event_id,
+                    "employee_id": employee_id,
+                    "event_date": date(2026, 1, 1),
+                    "income": "100",
+                }
+            ]
+        )
 
 
 @pytest.mark.parametrize(
@@ -176,6 +235,7 @@ def test_installment_status_flags_overpayment_and_late_payment():
         ],
         deadline=date(2027, 1, 1),
         tax_batch_id="E1-TAX",
+        as_of_date=date(2027, 1, 2),
     )
 
     assert result["paid"] == Decimal("1100.00")
@@ -288,3 +348,76 @@ def test_installment_status_counts_payment_when_event_and_batch_both_match():
     assert result["has_invalid_payments"] is False
     assert result["invalid_payment_count"] == 0
     assert result["warnings"] == []
+
+
+def test_installment_status_excludes_future_payment_from_historical_balance():
+    result = installment_status(
+        event_id="E7",
+        tax_batch_id="E7-TAX",
+        incremental_tax="1000",
+        payments=[
+            {
+                "event_id": "E7",
+                "tax_batch_id": "E7-TAX",
+                "payment_date": date(2026, 6, 30),
+                "amount": "400",
+            },
+            {
+                "event_id": "E7",
+                "tax_batch_id": "E7-TAX",
+                "payment_date": date(2026, 7, 1),
+                "amount": "600",
+            },
+        ],
+        deadline=date(2028, 1, 1),
+        as_of_date=date(2026, 6, 30),
+    )
+
+    assert result["paid"] == Decimal("400.00")
+    assert result["remaining"] == Decimal("600.00")
+    assert result["is_overpaid"] is False
+
+
+def test_installment_status_counts_payment_on_departure_date():
+    result = installment_status(
+        event_id="E8",
+        tax_batch_id="E8-TAX",
+        incremental_tax="1000",
+        payments=[
+            {
+                "event_id": "E8",
+                "tax_batch_id": "E8-TAX",
+                "payment_date": date(2026, 6, 30),
+                "amount": "1000",
+            }
+        ],
+        deadline=date(2028, 1, 1),
+        departure_date=date(2026, 6, 30),
+        as_of_date=date(2026, 6, 30),
+    )
+
+    assert result["paid"] == Decimal("1000.00")
+    assert result["remaining"] == Decimal("0.00")
+    assert result["departure_unpaid"] is False
+
+
+@pytest.mark.parametrize(
+    ("event_id", "tax_batch_id", "message"),
+    [
+        (None, "E9-TAX", "事件编号不能为空"),
+        ("   ", "E9-TAX", "事件编号不能为空"),
+        ("E9", None, "税额批次编号不能为空"),
+        ("E9", "   ", "税额批次编号不能为空"),
+    ],
+)
+def test_installment_status_rejects_empty_target_identifiers(
+    event_id, tax_batch_id, message
+):
+    with pytest.raises(ValueError, match=message):
+        installment_status(
+            event_id=event_id,
+            tax_batch_id=tax_batch_id,
+            incremental_tax="1000",
+            payments=[],
+            deadline=date(2028, 1, 1),
+        )
