@@ -490,6 +490,188 @@ def test_departure_date_boundaries_after_com_recalculation(generated_path, tmp_p
     assert ledger.cell(4, ledger_headers["校验"]).value == "异常：离职后缴税"
 
 
+def test_payment_as_of_date_formula_structure(workbook):
+    instruction_ws = workbook["使用说明"]
+    ledger_ws = workbook["分期缴税台账"]
+    event_ws = workbook["激励事件明细"]
+    summary_ws = workbook["年度计税汇总"]
+    ledger_headers = header_map(ledger_ws)
+    event_headers = header_map(event_ws)
+    summary_headers = header_map(summary_ws)
+
+    assert instruction_ws["A21"].value == "检查截至日期"
+    assert instruction_ws["B21"].value is not None
+    assert "截至日有效实缴" in ledger_headers
+    effective_formula = ledger_ws.cell(2, ledger_headers["截至日有效实缴"]).value
+    assert "检查截至日期" in effective_formula
+    assert "ISNUMBER(I2)" in effective_formula
+    assert "I2<=检查截至日期" in effective_formula
+    assert f"${get_column_letter(ledger_headers['截至日有效实缴'])}$2" in event_ws.cell(
+        2, event_headers["批次有效已缴"]
+    ).value
+    assert f"${get_column_letter(ledger_headers['截至日有效实缴'])}$2" in summary_ws.cell(
+        2, summary_headers["已缴金额"]
+    ).value
+    assert "缴税日期为空" in ledger_ws.cell(2, ledger_headers["校验"]).value
+
+
+def test_duplicate_event_formula_structure(workbook):
+    event_ws = workbook["激励事件明细"]
+    ledger_ws = workbook["分期缴税台账"]
+    headers = header_map(event_ws)
+    assert "有效事件" in headers
+    valid_formula = event_ws.cell(4, headers["有效事件"]).value
+    assert "COUNTIF($A$2:$A$501,A4)=1" in valid_formula
+    assert headers["有效事件"] > headers["年度未缴到期键"]
+    assert f"{get_column_letter(headers['有效事件'])}4" in event_ws.cell(
+        4, headers["本次应纳税所得额"]
+    ).value
+    raw_income_formula = event_ws.cell(4, headers["原始本次所得"]).value
+    assert raw_income_formula.count("(") == raw_income_formula.count(")")
+    resolved_event_formula = ledger_ws.cell(
+        2, header_map(ledger_ws)["解析事件编号"]
+    ).value
+    assert "COUNTIF('激励事件明细'!$A$2:$A$501,D2)=1" in resolved_event_formula
+    assert "COUNTIF('激励事件明细'!$B$2:$B$501,E2)=1" in resolved_event_formula
+
+
+def test_date_validations_use_long_term_upper_bound(workbook):
+    for sheet_name in ("激励事件明细", "分期缴税台账"):
+        validations = workbook[sheet_name].data_validations.dataValidation
+        date_validations = [item for item in validations if item.type == "date"]
+        assert date_validations
+        assert all("2035" not in str(item.formula2) for item in date_validations)
+        assert all("2099" in str(item.formula2) for item in date_validations)
+
+
+def test_as_of_date_duplicate_and_long_date_after_com_recalculation(
+    generated_path, tmp_path
+):
+    path = tmp_path / "as-of-duplicate-long-date.xlsx"
+    shutil.copy2(generated_path, path)
+    workbook = openpyxl.load_workbook(path)
+    instruction_ws = workbook["使用说明"]
+    plan_ws = workbook["计划参数"]
+    event_ws = workbook["激励事件明细"]
+    summary_ws = workbook["年度计税汇总"]
+    ledger_ws = workbook["分期缴税台账"]
+    single_ws = workbook["单人测算"]
+    event_headers = header_map(event_ws)
+    summary_headers = header_map(summary_ws)
+    ledger_headers = header_map(ledger_ws)
+
+    instruction_ws["B21"] = date(2026, 6, 30)
+    for row, employee_id, name in (
+        (3, "ASOF001", "截至日测试"),
+        (4, "DUP001", "重复事件测试"),
+        (5, "LONG001", "长期日期测试"),
+    ):
+        plan_ws.cell(row, 9, employee_id)
+        plan_ws.cell(row, 10, name)
+    normal_event = {
+        "事件编号": "ASOF-EVT-001",
+        "员工编号": "ASOF001",
+        "姓名": "截至日测试",
+        "激励计划": "2023年股票期权与限制性股票激励计划",
+        "权益类型": "股票期权",
+        "事件日期": date(2026, 6, 1),
+        "本次行权或解禁数量": 50000,
+        "行权日或解禁日收盘价": 17.8,
+        "备案状态": "已备案",
+    }
+    for header, value in normal_event.items():
+        event_ws.cell(4, event_headers[header], value)
+
+    for row, event_date in ((5, date(2026, 5, 1)), (6, date(2026, 5, 2))):
+        duplicate_event = {
+            "事件编号": "DUP-EVT-001",
+            "员工编号": "DUP001",
+            "姓名": "重复事件测试",
+            "激励计划": "2023年股票期权与限制性股票激励计划",
+            "权益类型": "其他股权激励",
+            "事件日期": event_date,
+            "其他需合并股权激励所得": 20000,
+            "备案状态": "已备案",
+        }
+        for header, value in duplicate_event.items():
+            event_ws.cell(row, event_headers[header], value)
+
+    long_event = {
+        "事件编号": "LONG-EVT-001",
+        "员工编号": "LONG001",
+        "姓名": "长期日期测试",
+        "激励计划": "2023年股票期权与限制性股票激励计划",
+        "权益类型": "其他股权激励",
+        "事件日期": date(2096, 12, 31),
+        "其他需合并股权激励所得": 10000,
+        "备案状态": "已备案",
+    }
+    for header, value in long_event.items():
+        event_ws.cell(7, event_headers[header], value)
+
+    for row, payment_date in ((2, None), (3, date(2026, 7, 1)), (4, date(2026, 6, 30))):
+        ledger_ws.cell(row, ledger_headers["员工编号"], "ASOF001")
+        ledger_ws.cell(row, ledger_headers["姓名"], "截至日测试")
+        ledger_ws.cell(row, ledger_headers["纳税年度"], 2026)
+        ledger_ws.cell(row, ledger_headers["事件编号"], "ASOF-EVT-001")
+        ledger_ws.cell(row, ledger_headers["缴税日期"], payment_date)
+        ledger_ws.cell(row, ledger_headers["实际缴税金额"], 1000)
+    ledger_ws.cell(5, ledger_headers["员工编号"], "DUP001")
+    ledger_ws.cell(5, ledger_headers["事件编号"], "DUP-EVT-001")
+    ledger_ws.cell(5, ledger_headers["缴税日期"], date(2026, 6, 1))
+    ledger_ws.cell(5, ledger_headers["实际缴税金额"], 1000)
+    ledger_ws.cell(6, ledger_headers["事件编号"], "ASOF-EVT-001")
+    ledger_ws.cell(6, ledger_headers["缴税日期"], date(2026, 7, 15))
+    ledger_ws.cell(6, ledger_headers["计划缴税金额"], 2000)
+
+    summary_ws["A3"] = "ASOF001"
+    summary_ws["B3"] = "截至日测试"
+    summary_ws["C3"] = 2026
+    summary_ws["A4"] = "DUP001"
+    summary_ws["B4"] = "重复事件测试"
+    summary_ws["C4"] = 2026
+    single_ws["B3"] = "ASOF001"
+    single_ws["B4"] = 2026
+    workbook.save(path)
+
+    result = excel_com_open(path, save=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    calculated = openpyxl.load_workbook(path, data_only=True)
+    events = calculated["激励事件明细"]
+    summary = calculated["年度计税汇总"]
+    ledger = calculated["分期缴税台账"]
+    single = calculated["单人测算"]
+
+    effective_col = ledger_headers["截至日有效实缴"]
+    assert ledger.cell(2, effective_col).value == 0
+    assert ledger.cell(3, effective_col).value == 0
+    assert ledger.cell(4, effective_col).value == 1000
+    assert ledger.cell(6, effective_col).value == 0
+    assert ledger.cell(2, ledger_headers["累计已缴"]).value == 1000
+    assert "缴税日期为空" in ledger.cell(2, ledger_headers["校验"]).value
+    assert "晚于截至日期" in ledger.cell(3, ledger_headers["校验"]).value
+    assert ledger.cell(4, ledger_headers["校验"]).value == "正常"
+    assert events.cell(4, event_headers["批次有效已缴"]).value == 1000
+    assert summary.cell(3, summary_headers["已缴金额"]).value == 1000
+    assert single["B8"].value == 1000
+
+    for row in (5, 6):
+        assert events.cell(row, event_headers["有效事件"]).value == "无效"
+        assert events.cell(row, event_headers["原始本次所得"]).value == 0
+        assert events.cell(row, event_headers["本次应纳税所得额"]).value == 0
+        assert events.cell(row, event_headers["本次新增税额"]).value in (None, 0)
+        assert "事件编号重复" in events.cell(row, event_headers["校验"]).value
+    assert summary.cell(4, summary_headers["年度股权激励应纳税所得额"]).value == 0
+    assert summary.cell(4, summary_headers["年度应纳税额"]).value == 0
+    assert ledger.cell(5, ledger_headers["解析事件编号"]).value in (None, "")
+    assert ledger.cell(5, effective_col).value == 0
+    assert "有效事件编号或税额批次" in ledger.cell(5, ledger_headers["校验"]).value
+
+    deadline = events.cell(7, event_headers["事件级36个月截止日"]).value
+    assert deadline.date() == date(2099, 12, 31)
+    assert events.cell(7, event_headers["校验"]).value == "正常"
+
+
 def test_other_equity_income_requires_only_other_income_fields(workbook):
     ws = workbook["激励事件明细"]
     headers = header_map(ws)

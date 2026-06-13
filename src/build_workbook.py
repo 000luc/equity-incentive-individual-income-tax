@@ -132,11 +132,11 @@ def add_date_validation(ws, ranges: list[str]) -> None:
         type="date",
         operator="between",
         formula1="DATE(2024,1,1)",
-        formula2="DATE(2035,12,31)",
+        formula2="DATE(2099,12,31)",
         allow_blank=True,
         showErrorMessage=True,
     )
-    validation.error = "请输入2024-01-01至2035-12-31之间的日期。"
+    validation.error = "请输入2024-01-01至2099-12-31之间的日期。"
     validation.errorTitle = "日期无效"
     ws.add_data_validation(validation)
     for cell_range in ranges:
@@ -158,7 +158,7 @@ def create_instructions(wb: Workbook) -> None:
         ("四、36个月", "每次事件新增税额独立形成批次，从该事件行权日或解禁日起单独计算36个月。"),
         ("五、限制性股票", "个人获授总数和个人实际出资必须按员工口径录入，公司802万股绝不能作为个人分母。"),
         ("六、员工主数据", "先在计划参数表I:J列维护员工编号和姓名；事件明细员工编号可下拉选择，也允许新增后补录主数据。"),
-        ("七、分期缴税", "缴税日期、计划金额和实际金额均可自定义；事件编号或税额批次任填其一，双填时必须指向同一事件。"),
+        ("七、分期缴税", "缴税日期、计划金额和实际金额均可自定义；只有缴税日期不晚于检查截至日期的实际缴税才计入已缴。"),
         ("八、其他股权激励", "选择“其他股权激励”时，只需填写其他需合并股权激励所得，不要求数量和市场价。"),
         ("九、单人测算", "该页只引用事件明细、年度汇总和分期台账；事件、缴税、批次余额各25行分页，最多20页。"),
         ("十、范围", "不计算股息红利个人所得税；演示数据仅用于验证公式，不得直接用于申报。"),
@@ -180,8 +180,17 @@ def create_instructions(wb: Workbook) -> None:
     ):
             ws.cell(19, col, label)
             ws.cell(19, col).fill = PatternFill("solid", fgColor=color)
+    ws["A21"] = "检查截至日期"
+    ws["A21"].font = Font(bold=True, color=NAVY)
+    ws["B21"] = date.today()
+    ws["B21"].number_format = DATE_FORMAT
+    ws["B21"].fill = PatternFill("solid", fgColor=INPUT_BLUE)
+    ws["B21"].protection = Protection(locked=False)
+    ws["C21"] = "默认生成当日；未来计划或未来实际缴税不提前冲减余额。"
+    ws.merge_cells("C21:H21")
+    add_date_validation(ws, ["B21"])
     set_column_widths(ws, {1: 18, 2: 24, 3: 18, 4: 18, 5: 18, 6: 18, 7: 18, 8: 18})
-    ws.print_area = "A1:H20"
+    ws.print_area = "A1:H21"
     ws.page_setup.fitToWidth = 1
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     protect(ws)
@@ -276,6 +285,7 @@ def event_headers() -> list[str]:
         "批次有效已缴",
         "批次未缴",
         "年度未缴到期键",
+        "有效事件",
     ]
 
 
@@ -330,36 +340,36 @@ def create_event_sheet(wb: Workbook) -> None:
         ws.cell(
             row,
             19,
-            f'=IF(OR(A{row}="",C{row}="",F{row}="",G{row}=""),"",'
+            f'=IF(A{row}="","",IF(AN{row}<>"有效",0,IF(OR(C{row}="",F{row}="",G{row}=""),"",'
             f'IF(F{row}="股票期权",IF(OR(I{row}="",J{row}="",K{row}=""),"",(J{row}-K{row})*I{row}),'
             f'IF(F{row}="限制性股票",IF(OR(L{row}="",M{row}="",M{row}<=0,N{row}=""),"",'
             f'((L{row}+J{row})/2)*I{row}-N{row}*I{row}/M{row}),'
-            f'IF(F{row}="其他股权激励",IF(O{row}="","",O{row}),""))))',
+            f'IF(F{row}="其他股权激励",IF(O{row}="","",O{row}),""))))))',
         )
         ws.cell(
             row,
             20,
-            f'=IF(S{row}="","",MAX(0,S{row}))',
+            f'=IF(S{row}="","",IF(AN{row}="有效",MAX(0,S{row}),0))',
         )
         ws.cell(
             row,
             21,
-            f'=IF(T{row}="","",SUMIFS($T$2:$T$501,$C$2:$C$501,C{row},$H$2:$H$501,H{row},'
+            f'=IF(AN{row}<>"有效","",SUMIFS($T$2:$T$501,$C$2:$C$501,C{row},$H$2:$H$501,H{row},'
             f'$G$2:$G$501,"<"&G{row})+SUMIFS($T$2:$T$501,$C$2:$C$501,C{row},'
             f'$H$2:$H$501,H{row},$G$2:$G$501,G{row},$A$2:$A$501,"<"&A{row}))',
         )
-        ws.cell(row, 22, f'=IF(T{row}="","",U{row}+T{row})')
-        ws.cell(row, 23, f'=IF(V{row}="","",VLOOKUP(V{row},\'税率及规则\'!$A$2:$C$8,2,TRUE))')
-        ws.cell(row, 24, f'=IF(V{row}="","",VLOOKUP(V{row},\'税率及规则\'!$A$2:$C$8,3,TRUE))')
-        ws.cell(row, 25, f'=IF(V{row}="","",MAX(0,V{row}*W{row}-X{row}))')
+        ws.cell(row, 22, f'=IF(AN{row}<>"有效","",U{row}+T{row})')
+        ws.cell(row, 23, f'=IF(AN{row}<>"有效","",VLOOKUP(V{row},\'税率及规则\'!$A$2:$C$8,2,TRUE))')
+        ws.cell(row, 24, f'=IF(AN{row}<>"有效","",VLOOKUP(V{row},\'税率及规则\'!$A$2:$C$8,3,TRUE))')
+        ws.cell(row, 25, f'=IF(AN{row}<>"有效","",MAX(0,V{row}*W{row}-X{row}))')
         ws.cell(
             row,
             26,
-            f'=IF(U{row}="","",MAX(0,U{row}*VLOOKUP(U{row},\'税率及规则\'!$A$2:$C$8,2,TRUE)-'
+            f'=IF(AN{row}<>"有效","",MAX(0,U{row}*VLOOKUP(U{row},\'税率及规则\'!$A$2:$C$8,2,TRUE)-'
             f'VLOOKUP(U{row},\'税率及规则\'!$A$2:$C$8,3,TRUE)))',
         )
-        ws.cell(row, 27, f'=IF(Y{row}="","",MAX(0,Y{row}-Z{row}))')
-        ws.cell(row, 28, f'=IF(G{row}="","",G{row})')
+        ws.cell(row, 27, f'=IF(AN{row}<>"有效","",MAX(0,Y{row}-Z{row}))')
+        ws.cell(row, 28, f'=IF(OR(G{row}="",AN{row}<>"有效"),"",G{row})')
         ws.cell(
             row,
             29,
@@ -382,9 +392,9 @@ def create_event_sheet(wb: Workbook) -> None:
             f'IF(COUNTIF(\'计划参数\'!$I$2:$I$501,C{row})=0,"提示：员工编号未在主数据",'
             f'IF(Q{row}<>"已备案","提示：未确认备案","正常"))))))))))))',
         )
-        ws.cell(row, 32, f'=IF(C{row}="","",IF(COUNTIF($C$2:C{row},C{row})=1,MAX($AF$1:AF{row - 1})+1,""))')
-        ws.cell(row, 33, f'=IF(C{row}="","",COUNTIF($C$2:C{row},C{row}))')
-        ws.cell(row, 34, f'=IF(C{row}="","",C{row}&"|"&AG{row})')
+        ws.cell(row, 32, f'=IF(OR(C{row}="",AN{row}<>"有效"),"",IF(COUNTIFS($C$2:C{row},C{row},$AN$2:AN{row},"有效")=1,MAX($AF$1:AF{row - 1})+1,""))')
+        ws.cell(row, 33, f'=IF(OR(C{row}="",AN{row}<>"有效"),"",COUNTIFS($C$2:C{row},C{row},$AN$2:AN{row},"有效"))')
+        ws.cell(row, 34, f'=IF(AG{row}="","",C{row}&"|"&AG{row})')
         ws.cell(
             row,
             35,
@@ -402,7 +412,7 @@ def create_event_sheet(wb: Workbook) -> None:
         ws.cell(
             row,
             37,
-            f'=IF(A{row}="","",SUMIFS(\'分期缴税台账\'!$K$2:$K$501,'
+            f'=IF(OR(A{row}="",AN{row}<>"有效"),"",SUMIFS(\'分期缴税台账\'!$X$2:$X$501,'
             f'\'分期缴税台账\'!$T$2:$T$501,A{row},\'分期缴税台账\'!$Q$2:$Q$501,"有效"))',
         )
         ws.cell(row, 38, f'=IF(AA{row}="","",MAX(0,AA{row}-AK{row}))')
@@ -412,6 +422,11 @@ def create_event_sheet(wb: Workbook) -> None:
             f'=IF(OR(A{row}="",AL{row}<=0),"",C{row}&"|"&H{row}&"|"&('
             f'COUNTIFS($C$2:$C$501,C{row},$H$2:$H$501,H{row},$AL$2:$AL$501,">0",$AC$2:$AC$501,"<"&AC{row})+'
             f'COUNTIFS($C$2:$C$501,C{row},$H$2:$H$501,H{row},$AL$2:$AL$501,">0",$AC$2:$AC$501,AC{row},$A$2:$A$501,"<="&A{row})))',
+        )
+        ws.cell(
+            row,
+            40,
+            f'=IF(A{row}="","",IF(COUNTIF($A$2:$A$501,A{row})=1,"有效","无效"))',
         )
 
     style_header(ws)
@@ -457,7 +472,7 @@ def create_event_sheet(wb: Workbook) -> None:
             29: 28, 30: 28,
         },
     )
-    for column in ("AF", "AG", "AH", "AI", "AJ", "AK", "AL", "AM"):
+    for column in ("AF", "AG", "AH", "AI", "AJ", "AK", "AL", "AM", "AN"):
         ws.column_dimensions[column].hidden = True
     protect(ws)
 
@@ -519,17 +534,17 @@ def create_summary(wb: Workbook) -> None:
         ws.cell(row, 8, f'=IF(G{row}="","",VLOOKUP(G{row},\'税率及规则\'!$A$2:$C$8,2,TRUE))')
         ws.cell(row, 9, f'=IF(G{row}="","",VLOOKUP(G{row},\'税率及规则\'!$A$2:$C$8,3,TRUE))')
         ws.cell(row, 10, f'=IF(G{row}="","",MAX(0,G{row}*H{row}-I{row}))')
-        ws.cell(row, 11, f'=IF(A{row}="","",SUMIFS(\'分期缴税台账\'!$K$2:$K$501,\'分期缴税台账\'!$A$2:$A$501,A{row},\'分期缴税台账\'!$C$2:$C$501,C{row},\'分期缴税台账\'!$Q$2:$Q$501,"有效"))')
+        ws.cell(row, 11, f'=IF(A{row}="","",SUMIFS(\'分期缴税台账\'!$X$2:$X$501,\'分期缴税台账\'!$A$2:$A$501,A{row},\'分期缴税台账\'!$C$2:$C$501,C{row},\'分期缴税台账\'!$Q$2:$Q$501,"有效"))')
         ws.cell(row, 12, f'=IF(J{row}="","",MAX(0,J{row}-K{row}))')
         ws.cell(row, 13, f'=IF(A{row}="","",COUNTIFS(\'激励事件明细\'!$C$2:$C$501,A{row},\'激励事件明细\'!$H$2:$H$501,C{row},\'激励事件明细\'!$AA$2:$AA$501,">0"))')
         ws.cell(row, 14, f'=IF(OR(A{row}="",C{row}=""),"",IFERROR(INDEX(\'激励事件明细\'!$A$2:$A$501,MATCH(A{row}&"|"&C{row}&"|1",\'激励事件明细\'!$AM$2:$AM$501,0)),""))')
         ws.cell(row, 15, f'=IF(N{row}="","",IFERROR(INDEX(\'激励事件明细\'!$AC$2:$AC$501,MATCH(N{row},\'激励事件明细\'!$A$2:$A$501,0)),""))')
-        ws.cell(row, 16, f'=IF(A{row}="","",IF(M{row}=0,"",IF(K{row}>J{row},"异常：超额缴税",IF(L{row}=0,"已缴清",IF(AND(O{row}<TODAY(),L{row}>0),"逾期未缴","未缴清")))))')
+        ws.cell(row, 16, f'=IF(A{row}="","",IF(M{row}=0,"",IF(K{row}>J{row},"异常：超额缴税",IF(L{row}=0,"已缴清",IF(AND(O{row}<检查截至日期,L{row}>0),"逾期未缴","未缴清")))))')
     style_header(ws)
     fill_cells(ws, {1, 3}, 2, SUMMARY_LAST_ROW, INPUT_BLUE, False)
     fill_cells(ws, set(range(2, len(headers) + 1)) - {3}, 2, SUMMARY_LAST_ROW, FORMULA_GREEN, True)
     add_list_validation(ws, "=员工编号列表", [f"A2:A{SUMMARY_LAST_ROW}"])
-    add_decimal_validation(ws, [f"C2:C{SUMMARY_LAST_ROW}"], "between", "2024", "2035")
+    add_decimal_validation(ws, [f"C2:C{SUMMARY_LAST_ROW}"], "between", "2024", "2099")
     for row in range(2, SUMMARY_LAST_ROW + 1):
         for column in range(4, 13):
             ws.cell(row, column).number_format = MONEY_FORMAT
@@ -551,7 +566,7 @@ def create_ledger(wb: Workbook) -> None:
         "员工编号", "姓名", "纳税年度", "事件编号", "新增税额批次", "该事件新增应纳税额",
         "该事件纳税义务发生日", "该事件最晚缴清日", "缴税日期", "计划缴税金额", "实际缴税金额",
         "完税凭证号", "累计已缴", "剩余税额", "是否逾期", "离职日期", "关联有效", "校验", "备注",
-        "解析事件编号", "解析税额批次", "员工缴税序号", "员工缴税键",
+        "解析事件编号", "解析税额批次", "员工缴税序号", "员工缴税键", "截至日有效实缴",
     ]
     ws.append(headers)
     for _ in range(2, LEDGER_LAST_ROW + 1):
@@ -560,9 +575,11 @@ def create_ledger(wb: Workbook) -> None:
         ws.cell(
             row,
             20,
-            f'=IF(D{row}<>"",IF(COUNTIF(\'激励事件明细\'!$A$2:$A$501,D{row})=1,D{row},""),'
-            f'IF(E{row}<>"",IFERROR(INDEX(\'激励事件明细\'!$A$2:$A$501,'
-            f'MATCH(E{row},\'激励事件明细\'!$B$2:$B$501,0)),""),""))',
+            f'=IF(D{row}<>"",IF(AND(COUNTIF(\'激励事件明细\'!$A$2:$A$501,D{row})=1,'
+            f'IFERROR(INDEX(\'激励事件明细\'!$AN$2:$AN$501,MATCH(D{row},\'激励事件明细\'!$A$2:$A$501,0)),"")="有效"),D{row},""),'
+            f'IF(E{row}<>"",IF(AND(COUNTIF(\'激励事件明细\'!$B$2:$B$501,E{row})=1,'
+            f'IFERROR(INDEX(\'激励事件明细\'!$AN$2:$AN$501,MATCH(E{row},\'激励事件明细\'!$B$2:$B$501,0)),"")="有效"),'
+            f'IFERROR(INDEX(\'激励事件明细\'!$A$2:$A$501,MATCH(E{row},\'激励事件明细\'!$B$2:$B$501,0)),""),""),""))',
         )
         ws.cell(
             row,
@@ -586,10 +603,10 @@ def create_ledger(wb: Workbook) -> None:
         ws.cell(
             row,
             13,
-            f'=IF(T{row}="","",SUMIFS($K$2:$K$501,$T$2:$T$501,T{row},$Q$2:$Q$501,"有效"))',
+            f'=IF(T{row}="","",SUMIFS($X$2:$X$501,$T$2:$T$501,T{row},$Q$2:$Q$501,"有效"))',
         )
         ws.cell(row, 14, f'=IF(F{row}="","",MAX(0,F{row}-M{row}))')
-        ws.cell(row, 15, f'=IF(A{row}="","",IF(AND(I{row}<>"",I{row}>H{row}),"是",IF(AND(TODAY()>H{row},N{row}>0),"是","否")))')
+        ws.cell(row, 15, f'=IF(A{row}="","",IF(AND(I{row}<>"",I{row}>H{row}),"是",IF(AND(检查截至日期>H{row},N{row}>0),"是","否")))')
         departure_lookup = f'INDEX(\'激励事件明细\'!$P$2:$P$501,{lookup})'
         ws.cell(
             row,
@@ -601,12 +618,19 @@ def create_ledger(wb: Workbook) -> None:
             18,
             f'=IF(Q{row}="冲突","异常：事件编号与税额批次冲突",'
             f'IF(Q{row}="无效","异常：必须关联有效事件编号或税额批次",'
+            f'IF(AND(K{row}>0,I{row}=""),"异常：实际缴税金额有值但缴税日期为空",'
             f'IF(AND(ISNUMBER(P{row}),P{row}>0,ISNUMBER(I{row}),K{row}>0,I{row}>P{row}),"异常：离职后缴税",'
             f'IF(M{row}>F{row},"异常：本批次超额缴税",IF(AND(I{row}<>"",I{row}>H{row}),"异常：超过事件截止日",'
-            f'IF(AND(ISNUMBER(P{row}),P{row}>0,TODAY()>=P{row},N{row}>0),"异常：离职前未缴清","正常"))))))',
+            f'IF(AND(K{row}>0,ISNUMBER(I{row}),I{row}>检查截至日期),"提示：缴税日期晚于截至日期，尚未计入",'
+            f'IF(AND(ISNUMBER(P{row}),P{row}>0,检查截至日期>=P{row},N{row}>0),"异常：离职前未缴清","正常"))))))))',
         )
         ws.cell(row, 22, f'=IF(A{row}="","",COUNTIF($A$2:A{row},A{row}))')
         ws.cell(row, 23, f'=IF(A{row}="","",A{row}&"|"&V{row})')
+        ws.cell(
+            row,
+            24,
+            f'=IF(AND(Q{row}="有效",K{row}>0,ISNUMBER(I{row}),I{row}<=检查截至日期),K{row},0)',
+        )
     style_header(ws)
     input_columns = {4, 5, 9, 10, 11, 12, 19}
     formula_columns = set(range(1, len(headers) + 1)) - input_columns
@@ -619,7 +643,7 @@ def create_ledger(wb: Workbook) -> None:
     for row in range(2, LEDGER_LAST_ROW + 1):
         for column in (7, 8, 9, 16):
             ws.cell(row, column).number_format = DATE_FORMAT
-        for column in (6, 10, 11, 13, 14):
+        for column in (6, 10, 11, 13, 14, 24):
             ws.cell(row, column).number_format = MONEY_FORMAT
     ws.conditional_formatting.add(
         f"R2:R{LEDGER_LAST_ROW}",
@@ -628,7 +652,7 @@ def create_ledger(wb: Workbook) -> None:
     add_table(ws, "tblInstallments", LEDGER_LAST_ROW, len(headers))
     set_print(ws, LEDGER_LAST_ROW, len(headers))
     set_column_widths(ws, {1: 14, 2: 12, 3: 10, 4: 18, 5: 22, 6: 22, 7: 22, 8: 20, 9: 14, 10: 16, 11: 16, 12: 20, 13: 16, 14: 16, 15: 12, 16: 14, 17: 28, 18: 24})
-    for column in ("T", "U", "V", "W"):
+    for column in ("T", "U", "V", "W", "X"):
         ws.column_dimensions[column].hidden = True
     protect(ws)
 
@@ -650,7 +674,7 @@ def create_person_sheet(wb: Workbook) -> None:
     ws["B5"] = '=IFERROR(INDEX(\'激励事件明细\'!$D$2:$D$501,MATCH(B3,\'激励事件明细\'!$C$2:$C$501,0)),"")'
     ws["B6"] = '=SUMIFS(\'激励事件明细\'!$T$2:$T$501,\'激励事件明细\'!$C$2:$C$501,B3)'
     ws["B7"] = '=SUMIFS(\'年度计税汇总\'!$J$2:$J$201,\'年度计税汇总\'!$A$2:$A$201,B3)'
-    ws["B8"] = '=SUMIFS(\'分期缴税台账\'!$K$2:$K$501,\'分期缴税台账\'!$A$2:$A$501,B3,\'分期缴税台账\'!$Q$2:$Q$501,"有效")'
+    ws["B8"] = '=SUMIFS(\'分期缴税台账\'!$X$2:$X$501,\'分期缴税台账\'!$A$2:$A$501,B3,\'分期缴税台账\'!$Q$2:$Q$501,"有效")'
     ws["B9"] = "=MAX(0,B7-B8)"
     ws["B10"] = '=IFERROR(INDEX(\'激励事件明细\'!$AC$2:$AC$501,MATCH(B3&"|1",\'激励事件明细\'!$AJ$2:$AJ$501,0)),"")'
     for row in range(5, 11):
@@ -720,10 +744,10 @@ def create_person_sheet(wb: Workbook) -> None:
         ws.cell(display_row, 1, f'=IFERROR(INDEX(\'激励事件明细\'!$A$2:$A$501,{match}),"")')
         ws.cell(display_row, 2, f'=IFERROR(INDEX(\'激励事件明细\'!$B$2:$B$501,{match}),"")')
         ws.cell(display_row, 3, f'=IFERROR(INDEX(\'激励事件明细\'!$AA$2:$AA$501,{match}),"")')
-        ws.cell(display_row, 4, f'=IF(A{display_row}="","",SUMIFS(\'分期缴税台账\'!$K$2:$K$501,\'分期缴税台账\'!$T$2:$T$501,A{display_row},\'分期缴税台账\'!$Q$2:$Q$501,"有效"))')
+        ws.cell(display_row, 4, f'=IF(A{display_row}="","",SUMIFS(\'分期缴税台账\'!$X$2:$X$501,\'分期缴税台账\'!$T$2:$T$501,A{display_row},\'分期缴税台账\'!$Q$2:$Q$501,"有效"))')
         ws.cell(display_row, 5, f'=IF(C{display_row}="","",MAX(0,C{display_row}-D{display_row}))')
         ws.cell(display_row, 6, f'=IFERROR(INDEX(\'激励事件明细\'!$AC$2:$AC$501,{match}),"")')
-        ws.cell(display_row, 7, f'=IF(A{display_row}="","",IF(E{display_row}=0,"已缴清",IF(F{display_row}<TODAY(),"逾期","未到期")))')
+        ws.cell(display_row, 7, f'=IF(A{display_row}="","",IF(E{display_row}=0,"已缴清",IF(F{display_row}<检查截至日期,"逾期","未到期")))')
         for column in (3, 4, 5):
             ws.cell(display_row, column).number_format = MONEY_FORMAT
         ws.cell(display_row, 6).number_format = DATE_FORMAT
@@ -794,6 +818,7 @@ def define_names(wb: Workbook) -> None:
         "员工编号列表": "'计划参数'!$I$2:$I$501",
         "事件编号列表": "'激励事件明细'!$A$2:$A$501",
         "税额批次列表": "'激励事件明细'!$B$2:$B$501",
+        "检查截至日期": "'使用说明'!$B$21",
     }
     for name, reference in names.items():
         wb.defined_names.add(DefinedName(name, attr_text=reference))
