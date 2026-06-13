@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -127,6 +128,15 @@ def test_generated_artifact_is_valid_xml_and_excel_can_open(generated_path):
         pytest.skip("Excel COM仅适用于Windows")
     result = excel_com_open(generated_path)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.fixture(scope="session")
+def recalculated_path(generated_path, tmp_path_factory):
+    path = tmp_path_factory.mktemp("recalculated") / OUTPUT.name
+    shutil.copy2(generated_path, path)
+    result = excel_com_open(path, save=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return path
 
 
 def header_map(ws) -> dict[str, int]:
@@ -479,8 +489,64 @@ def test_annual_summary_uses_non_array_helper_key_lookup(workbook):
     assert "MATCH(1,(" not in formula
     assert "INDEX" in formula and "MATCH" in formula
     assert "年度到期键" in header_map(workbook["激励事件明细"])
+    assert "年度未缴到期键" in header_map(workbook["激励事件明细"])
+    assert "O2" not in formula
     assert "'分期缴税台账'!$Q$2:$Q$501" in paid_formula
     assert '"有效"' in paid_formula
+
+
+def test_demo_annual_summary_has_recalculated_earliest_unpaid_event(recalculated_path):
+    workbook = openpyxl.load_workbook(recalculated_path, data_only=True)
+    ws = workbook["年度计税汇总"]
+    assert ws["N2"].value == "DEMO-OPT-001"
+    assert ws["O2"].value.date() == date(2028, 1, 9)
+    assert ws["P2"].value == "未缴清"
+
+
+def test_multiple_events_select_earliest_unpaid_deadline(generated_path, tmp_path):
+    path = tmp_path / "multiple-events.xlsx"
+    shutil.copy2(generated_path, path)
+    workbook = openpyxl.load_workbook(path)
+    event_ws = workbook["激励事件明细"]
+    event_headers = header_map(event_ws)
+    plan_ws = workbook["计划参数"]
+    plan_ws["I3"] = "MULTI001"
+    plan_ws["J3"] = "多事件员工"
+    events = [
+        ("MULTI-LATE", date(2025, 8, 31), 50000, 18.0),
+        ("MULTI-EARLY", date(2025, 2, 28), 50000, 18.0),
+    ]
+    for row, (event_id, event_date, quantity, market_price) in enumerate(events, start=4):
+        values = {
+            "事件编号": event_id,
+            "员工编号": "MULTI001",
+            "姓名": "多事件员工",
+            "激励计划": "2023年股票期权与限制性股票激励计划",
+            "权益类型": "股票期权",
+            "事件日期": event_date,
+            "本次行权或解禁数量": quantity,
+            "行权日或解禁日收盘价": market_price,
+            "备案状态": "已备案",
+        }
+        for header, value in values.items():
+            event_ws.cell(row, event_headers[header], value)
+    summary_ws = workbook["年度计税汇总"]
+    summary_ws["A3"] = "MULTI001"
+    summary_ws["C3"] = 2025
+    ledger_ws = workbook["分期缴税台账"]
+    ledger_headers = header_map(ledger_ws)
+    ledger_ws.cell(2, ledger_headers["事件编号"], "MULTI-EARLY")
+    ledger_ws.cell(2, ledger_headers["缴税日期"], date(2025, 3, 15))
+    ledger_ws.cell(2, ledger_headers["实际缴税金额"], 19880)
+    workbook.save(path)
+
+    result = excel_com_open(path, save=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    calculated = openpyxl.load_workbook(path, data_only=True)
+    summary = calculated["年度计税汇总"]
+    assert summary["N3"].value == "MULTI-LATE"
+    assert summary["O3"].value.date() == date(2028, 8, 31)
+    assert summary["P3"].value == "未缴清"
 
 
 def test_single_person_sheet_only_references_source_sheets(workbook):

@@ -273,6 +273,9 @@ def event_headers() -> list[str]:
         "员工事件键",
         "年度到期键",
         "员工到期键",
+        "批次有效已缴",
+        "批次未缴",
+        "年度未缴到期键",
     ]
 
 
@@ -357,7 +360,12 @@ def create_event_sheet(wb: Workbook) -> None:
         )
         ws.cell(row, 27, f'=IF(Y{row}="","",MAX(0,Y{row}-Z{row}))')
         ws.cell(row, 28, f'=IF(G{row}="","",G{row})')
-        ws.cell(row, 29, f'=IF(AB{row}="","",EDATE(AB{row},36))')
+        ws.cell(
+            row,
+            29,
+            f'=IF(AB{row}="","",IF(DAY(AB{row})=DAY(EOMONTH(AB{row},0)),'
+            f'EOMONTH(EDATE(AB{row},36),0),EDATE(AB{row},36)))',
+        )
         ws.cell(
             row,
             30,
@@ -391,6 +399,20 @@ def create_event_sheet(wb: Workbook) -> None:
             f'COUNTIFS($C$2:$C$501,C{row},$AA$2:$AA$501,">0",$AC$2:$AC$501,"<"&AC{row})+'
             f'COUNTIFS($C$2:$C$501,C{row},$AA$2:$AA$501,">0",$AC$2:$AC$501,AC{row},$A$2:$A$501,"<="&A{row})))',
         )
+        ws.cell(
+            row,
+            37,
+            f'=IF(A{row}="","",SUMIFS(\'分期缴税台账\'!$K$2:$K$501,'
+            f'\'分期缴税台账\'!$T$2:$T$501,A{row},\'分期缴税台账\'!$Q$2:$Q$501,"有效"))',
+        )
+        ws.cell(row, 38, f'=IF(AA{row}="","",MAX(0,AA{row}-AK{row}))')
+        ws.cell(
+            row,
+            39,
+            f'=IF(OR(A{row}="",AL{row}<=0),"",C{row}&"|"&H{row}&"|"&('
+            f'COUNTIFS($C$2:$C$501,C{row},$H$2:$H$501,H{row},$AL$2:$AL$501,">0",$AC$2:$AC$501,"<"&AC{row})+'
+            f'COUNTIFS($C$2:$C$501,C{row},$H$2:$H$501,H{row},$AL$2:$AL$501,">0",$AC$2:$AC$501,AC{row},$A$2:$A$501,"<="&A{row})))',
+        )
 
     style_header(ws)
     input_columns = {1, 3, 4, 5, 6, 7, 9, 10, 13, 14, 15, 16, 17, 18, 31}
@@ -400,7 +422,7 @@ def create_event_sheet(wb: Workbook) -> None:
     for row in range(2, EVENT_LAST_ROW + 1):
         for column in (7, 16, 18, 28, 29):
             ws.cell(row, column).number_format = DATE_FORMAT
-        for column in (10, 11, 12, 14, 15, 19, 20, 21, 22, 24, 25, 26, 27):
+        for column in (10, 11, 12, 14, 15, 19, 20, 21, 22, 24, 25, 26, 27, 37, 38):
             ws.cell(row, column).number_format = MONEY_FORMAT
         ws.cell(row, 23).number_format = "0%"
     add_list_validation(ws, '"2023年股票期权与限制性股票激励计划"', [f"E2:E{EVENT_LAST_ROW}"])
@@ -435,7 +457,7 @@ def create_event_sheet(wb: Workbook) -> None:
             29: 28, 30: 28,
         },
     )
-    for column in ("AF", "AG", "AH", "AI", "AJ"):
+    for column in ("AF", "AG", "AH", "AI", "AJ", "AK", "AL", "AM"):
         ws.column_dimensions[column].hidden = True
     protect(ws)
 
@@ -500,9 +522,9 @@ def create_summary(wb: Workbook) -> None:
         ws.cell(row, 11, f'=IF(A{row}="","",SUMIFS(\'分期缴税台账\'!$K$2:$K$501,\'分期缴税台账\'!$A$2:$A$501,A{row},\'分期缴税台账\'!$C$2:$C$501,C{row},\'分期缴税台账\'!$Q$2:$Q$501,"有效"))')
         ws.cell(row, 12, f'=IF(J{row}="","",MAX(0,J{row}-K{row}))')
         ws.cell(row, 13, f'=IF(A{row}="","",COUNTIFS(\'激励事件明细\'!$C$2:$C$501,A{row},\'激励事件明细\'!$H$2:$H$501,C{row},\'激励事件明细\'!$AA$2:$AA$501,">0"))')
-        ws.cell(row, 14, f'=IF(O{row}="","",IFERROR(INDEX(\'激励事件明细\'!$A$2:$A$501,MATCH(A{row}&"|"&C{row}&"|1",\'激励事件明细\'!$AI$2:$AI$501,0)),""))')
+        ws.cell(row, 14, f'=IF(OR(A{row}="",C{row}=""),"",IFERROR(INDEX(\'激励事件明细\'!$A$2:$A$501,MATCH(A{row}&"|"&C{row}&"|1",\'激励事件明细\'!$AM$2:$AM$501,0)),""))')
         ws.cell(row, 15, f'=IF(N{row}="","",IFERROR(INDEX(\'激励事件明细\'!$AC$2:$AC$501,MATCH(N{row},\'激励事件明细\'!$A$2:$A$501,0)),""))')
-        ws.cell(row, 16, f'=IF(A{row}="","",IF(K{row}>J{row},"异常：超额缴税",IF(L{row}=0,"已缴清",IF(AND(O{row}<TODAY(),L{row}>0),"逾期未缴","未缴清"))))')
+        ws.cell(row, 16, f'=IF(A{row}="","",IF(M{row}=0,"",IF(K{row}>J{row},"异常：超额缴税",IF(L{row}=0,"已缴清",IF(AND(O{row}<TODAY(),L{row}>0),"逾期未缴","未缴清")))))')
     style_header(ws)
     fill_cells(ws, {1, 3}, 2, SUMMARY_LAST_ROW, INPUT_BLUE, False)
     fill_cells(ws, set(range(2, len(headers) + 1)) - {3}, 2, SUMMARY_LAST_ROW, FORMULA_GREEN, True)
