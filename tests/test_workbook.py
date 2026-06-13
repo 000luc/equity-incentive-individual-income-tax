@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 import sys
+import zipfile
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
+from xml.etree import ElementTree
 
 import openpyxl
 import pytest
@@ -37,18 +40,93 @@ SHEETS = [
     "政策及公告",
 ]
 ERROR_TOKENS = ("#REF!", "#DIV/0!", "#VALUE!", "#NAME?")
+XML_NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest().upper()
 
 
+def excel_com_open(path: Path, save: bool = False) -> subprocess.CompletedProcess[str]:
+    script = r"""
+[Console]::OutputEncoding=[System.Text.Encoding]::UTF8
+$excel=$null; $wb=$null
+try {
+  $excel=New-Object -ComObject Excel.Application
+  $excel.Visible=$false
+  $excel.DisplayAlerts=$false
+  $wb=$excel.Workbooks.Open($env:XLSX,0,$false)
+  $excel.CalculateFullRebuild()
+  if ($env:SAVE -eq '1') { $wb.Save() }
+  Write-Output ("COM_OPEN_OK Excel=" + $excel.Version + " Sheets=" + $wb.Worksheets.Count)
+  $wb.Close($false)
+} catch {
+  Write-Output ("COM_OPEN_ERROR=" + $_.Exception.Message)
+  Write-Output ("HRESULT=0x{0:X8}" -f ($_.Exception.HResult -band 0xffffffff))
+  exit 1
+} finally {
+  if ($wb) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($wb) }
+  if ($excel) {
+    $excel.Quit()
+    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($excel)
+  }
+  [GC]::Collect()
+  [GC]::WaitForPendingFinalizers()
+}
+"""
+    env = os.environ.copy()
+    env["XLSX"] = str(path)
+    env["SAVE"] = "1" if save else "0"
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=120,
+    )
+
+
+def validate_xlsx_xml(path: Path) -> None:
+    with zipfile.ZipFile(path) as archive:
+        assert archive.testzip() is None
+        for name in archive.namelist():
+            if name.endswith((".xml", ".rels")):
+                ElementTree.fromstring(archive.read(name))
+
+
+def test_committed_artifact_is_valid_xml_and_excel_can_open():
+    validate_xlsx_xml(OUTPUT)
+    if sys.platform != "win32":
+        pytest.skip("Excel COM仅适用于Windows")
+    result = excel_com_open(OUTPUT)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "COM_OPEN_OK Excel=16.0" in result.stdout
+
+
 @pytest.fixture(scope="session")
-def workbook():
+def generated_path(tmp_path_factory):
     assert BUILDER.exists(), "工作簿生成器尚未创建"
-    subprocess.run([sys.executable, str(BUILDER)], cwd=ROOT, check=True)
-    assert OUTPUT.exists(), "新版工作簿尚未生成"
-    return openpyxl.load_workbook(OUTPUT, data_only=False)
+    path = tmp_path_factory.mktemp("workbook") / OUTPUT.name
+    env = os.environ.copy()
+    env["WORKBOOK_OUTPUT"] = str(path)
+    subprocess.run([sys.executable, str(BUILDER)], cwd=ROOT, env=env, check=True)
+    assert path.exists(), "临时新版工作簿尚未生成"
+    return path
+
+
+@pytest.fixture(scope="session")
+def workbook(generated_path):
+    return openpyxl.load_workbook(generated_path, data_only=False)
+
+
+def test_generated_artifact_is_valid_xml_and_excel_can_open(generated_path):
+    validate_xlsx_xml(generated_path)
+    if sys.platform != "win32":
+        pytest.skip("Excel COM仅适用于Windows")
+    result = excel_com_open(generated_path)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def header_map(ws) -> dict[str, int]:
@@ -89,6 +167,11 @@ def test_plan_parameters_include_verified_announcement_facts(workbook):
         assert price in values
     assert "802万股不得作为个人分母" in text
     assert ws.protection.sheet
+    assert ws["I1"].value == "员工编号"
+    assert ws["J1"].value == "姓名"
+    assert ws["I2"].value == "DEMO001"
+    assert not ws["I2"].protection.locked
+    assert not ws["J2"].protection.locked
 
 
 def test_event_sheet_has_required_columns_and_500_input_rows(workbook):
@@ -122,7 +205,6 @@ def test_event_sheet_has_required_columns_and_500_input_rows(workbook):
     assert required <= headers.keys()
     assert ws.max_row >= 501
     assert ws.freeze_panes == "A2"
-    assert ws.auto_filter.ref
     assert ws.tables
 
     formula_headers = {
@@ -143,6 +225,15 @@ def test_event_sheet_has_required_columns_and_500_input_rows(workbook):
     for header in formula_headers:
         col = get_column_letter(headers[header])
         assert ws[f"{col}501"].data_type == "f", f"{header}未填充到第500条数据行"
+
+    employee_validation = next(
+        item
+        for item in ws.data_validations.dataValidation
+        if "C2:C501" in str(item.sqref)
+    )
+    assert employee_validation.formula1 == "=员工主数据编号"
+    assert employee_validation.errorStyle == "information"
+    assert employee_validation.showErrorMessage
 
 
 def test_demo_rows_and_expected_tax_match_tax_model(workbook):
@@ -272,6 +363,8 @@ def test_installment_ledger_links_event_batch_and_uses_event_deadline(workbook):
         "剩余税额",
         "是否逾期",
         "关联有效",
+        "解析事件编号",
+        "解析税额批次",
         "校验",
     }
     assert required <= headers.keys()
@@ -279,12 +372,16 @@ def test_installment_ledger_links_event_batch_and_uses_event_deadline(workbook):
     validation_formula = ws.cell(2, headers["校验"]).value
     link_formula = ws.cell(2, headers["关联有效"]).value
     paid_formula = ws.cell(2, headers["累计已缴"]).value
+    resolved_event_formula = ws.cell(2, headers["解析事件编号"]).value
+    resolved_batch_formula = ws.cell(2, headers["解析税额批次"]).value
     assert "激励事件明细" in deadline_formula
     assert "冲突" in validation_formula
     assert "离职后缴税" in validation_formula
-    assert "COUNTIF" in link_formula
+    assert "COUNTIF" in resolved_event_formula
     assert "有效" in link_formula
-    assert get_column_letter(headers["关联有效"]) in paid_formula
+    assert get_column_letter(headers["解析事件编号"]) in paid_formula
+    assert "INDEX" in resolved_event_formula and "MATCH" in resolved_event_formula
+    assert "INDEX" in resolved_batch_formula and "MATCH" in resolved_batch_formula
     assert ws.max_row >= 501
 
 
@@ -325,6 +422,27 @@ def test_event_and_batch_conflict_and_departure_late_payment_mirror():
     )
     assert late_departure["paid"] == Decimal("1000.00")
     assert late_departure["departure_unpaid"]
+
+
+def test_other_equity_income_requires_only_other_income_fields(workbook):
+    ws = workbook["激励事件明细"]
+    headers = header_map(ws)
+    raw_formula = ws.cell(4, headers["原始本次所得"]).value
+    validation_formula = ws.cell(4, headers["校验"]).value
+    assert 'F4="其他股权激励"' in raw_formula
+    assert "O4" in raw_formula
+    assert 'F4<>"其他股权激励"' in validation_formula
+    batches = event_tax_batches(
+        [
+            {
+                "event_id": "OTHER-001",
+                "employee_id": "E001",
+                "event_date": date(2026, 6, 1),
+                "income": Decimal("50000"),
+            }
+        ]
+    )
+    assert batches[0]["incremental_tax"] == Decimal("2480.00")
 
 
 def test_event_prices_reference_plan_parameters_without_hardcoding(workbook):
@@ -380,7 +498,18 @@ def test_single_person_sheet_only_references_source_sheets(workbook):
     validation = next(
         item for item in ws.data_validations.dataValidation if "B3" in str(item.sqref)
     )
-    assert "单人测算" in validation.formula1
+    assert validation.formula1 == "=员工主数据编号"
+    for cell in ("B12", "D12", "F12"):
+        assert ws[cell].value == 1
+        assert not ws[cell].protection.locked
+    for cell in ("B13", "D13", "F13"):
+        assert "ROUNDUP" in ws[cell].value
+        assert "/25" in ws[cell].value
+    assert "25" in ws["A25"].value or "25" in ws["A25"].value.replace("$", "")
+    formulas = "\n".join(cell.value for cell in formula_cells(ws))
+    assert "解析事件编号" not in formulas
+    assert "'分期缴税台账'!$W$2:$W$501" in formulas
+    assert "越界" in formulas
 
 
 def test_validations_styles_protection_and_print_settings(workbook):
@@ -388,15 +517,12 @@ def test_validations_styles_protection_and_print_settings(workbook):
     ledger_ws = workbook["分期缴税台账"]
     summary_ws = workbook["年度计税汇总"]
     event_validations = event_ws.data_validations.dataValidation
-    assert not any(
-        "C2:C501" in str(validation.sqref) or "C4:C501" in str(validation.sqref)
-        for validation in event_validations
-    )
+    assert any("C2:C501" in str(validation.sqref) for validation in event_validations)
     assert len(ledger_ws.data_validations.dataValidation) >= 3
 
     for ws in (event_ws, ledger_ws, summary_ws):
         assert ws.freeze_panes
-        assert ws.auto_filter.ref
+        assert ws.auto_filter.ref or ws.tables
         assert ws.print_area
         assert ws.sheet_properties.pageSetUpPr.fitToPage
         assert ws.protection.sheet
@@ -419,3 +545,17 @@ def test_no_formula_contains_excel_error_tokens(workbook):
                 cell.coordinate,
                 cell.value,
             )
+
+
+def test_xml_has_no_duplicate_sheet_autofilter_or_aggregate_formula(generated_path):
+    with zipfile.ZipFile(generated_path) as archive:
+        for name in archive.namelist():
+            if not name.startswith("xl/worksheets/sheet") or not name.endswith(".xml"):
+                continue
+            root = ElementTree.fromstring(archive.read(name))
+            has_table_parts = root.find("m:tableParts", XML_NS) is not None
+            if has_table_parts:
+                assert root.find("m:autoFilter", XML_NS) is None
+            for formula in root.findall(".//m:f", XML_NS):
+                assert "AGGREGATE(" not in (formula.text or "")
+                assert "MINIFS(" not in (formula.text or "")
