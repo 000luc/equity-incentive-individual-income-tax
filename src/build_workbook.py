@@ -590,15 +590,20 @@ def create_ledger(wb: Workbook) -> None:
         )
         ws.cell(row, 14, f'=IF(F{row}="","",MAX(0,F{row}-M{row}))')
         ws.cell(row, 15, f'=IF(A{row}="","",IF(AND(I{row}<>"",I{row}>H{row}),"是",IF(AND(TODAY()>H{row},N{row}>0),"是","否")))')
-        ws.cell(row, 16, f'=IF(A{row}="","",IFERROR(INDEX(\'激励事件明细\'!$P$2:$P$501,{lookup}),""))')
+        departure_lookup = f'INDEX(\'激励事件明细\'!$P$2:$P$501,{lookup})'
+        ws.cell(
+            row,
+            16,
+            f'=IF(A{row}="","",IFERROR(IF({departure_lookup}=0,"",{departure_lookup}),""))',
+        )
         ws.cell(
             row,
             18,
             f'=IF(Q{row}="冲突","异常：事件编号与税额批次冲突",'
             f'IF(Q{row}="无效","异常：必须关联有效事件编号或税额批次",'
-            f'IF(AND(P{row}<>"",I{row}<>"",K{row}>0,I{row}>P{row}),"异常：离职后缴税",'
+            f'IF(AND(ISNUMBER(P{row}),P{row}>0,ISNUMBER(I{row}),K{row}>0,I{row}>P{row}),"异常：离职后缴税",'
             f'IF(M{row}>F{row},"异常：本批次超额缴税",IF(AND(I{row}<>"",I{row}>H{row}),"异常：超过事件截止日",'
-            f'IF(AND(P{row}<>"",TODAY()>=P{row},N{row}>0),"异常：离职前未缴清","正常"))))))',
+            f'IF(AND(ISNUMBER(P{row}),P{row}>0,TODAY()>=P{row},N{row}>0),"异常：离职前未缴清","正常"))))))',
         )
         ws.cell(row, 22, f'=IF(A{row}="","",COUNTIF($A$2:A{row},A{row}))')
         ws.cell(row, 23, f'=IF(A{row}="","",A{row}&"|"&V{row})')

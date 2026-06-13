@@ -382,6 +382,7 @@ def test_installment_ledger_links_event_batch_and_uses_event_deadline(workbook):
     validation_formula = ws.cell(2, headers["校验"]).value
     link_formula = ws.cell(2, headers["关联有效"]).value
     paid_formula = ws.cell(2, headers["累计已缴"]).value
+    departure_formula = ws.cell(2, headers["离职日期"]).value
     resolved_event_formula = ws.cell(2, headers["解析事件编号"]).value
     resolved_batch_formula = ws.cell(2, headers["解析税额批次"]).value
     assert "激励事件明细" in deadline_formula
@@ -392,6 +393,8 @@ def test_installment_ledger_links_event_batch_and_uses_event_deadline(workbook):
     assert get_column_letter(headers["解析事件编号"]) in paid_formula
     assert "INDEX" in resolved_event_formula and "MATCH" in resolved_event_formula
     assert "INDEX" in resolved_batch_formula and "MATCH" in resolved_batch_formula
+    assert "ISNUMBER" in validation_formula
+    assert '=0,""' in departure_formula
     assert ws.max_row >= 501
 
 
@@ -432,6 +435,59 @@ def test_event_and_batch_conflict_and_departure_late_payment_mirror():
     )
     assert late_departure["paid"] == Decimal("1000.00")
     assert late_departure["departure_unpaid"]
+
+
+def test_departure_date_boundaries_after_com_recalculation(generated_path, tmp_path):
+    path = tmp_path / "departure-boundaries.xlsx"
+    shutil.copy2(generated_path, path)
+    workbook = openpyxl.load_workbook(path)
+    plan_ws = workbook["计划参数"]
+    event_ws = workbook["激励事件明细"]
+    ledger_ws = workbook["分期缴税台账"]
+    event_headers = header_map(event_ws)
+    ledger_headers = header_map(ledger_ws)
+
+    cases = [
+        ("NODEPART", "无离职员工", None, date(2025, 2, 1)),
+        ("SAMEDAY", "当天缴款员工", date(2025, 2, 1), date(2025, 2, 1)),
+        ("LATEPAY", "晚一天员工", date(2025, 2, 1), date(2025, 2, 2)),
+    ]
+    for offset, (employee_id, name, departure_date, payment_date) in enumerate(
+        cases, start=3
+    ):
+        plan_ws.cell(offset, 9, employee_id)
+        plan_ws.cell(offset, 10, name)
+        event_row = offset + 1
+        event_values = {
+            "事件编号": f"{employee_id}-E1",
+            "员工编号": employee_id,
+            "姓名": name,
+            "激励计划": "2023年股票期权与限制性股票激励计划",
+            "权益类型": "股票期权",
+            "事件日期": date(2025, 1, 9),
+            "本次行权或解禁数量": 50000,
+            "行权日或解禁日收盘价": 17.8,
+            "离职日期": departure_date,
+            "备案状态": "已备案",
+        }
+        for header, value in event_values.items():
+            event_ws.cell(event_row, event_headers[header], value)
+
+        ledger_row = offset - 1
+        ledger_ws.cell(ledger_row, ledger_headers["事件编号"], f"{employee_id}-E1")
+        ledger_ws.cell(ledger_row, ledger_headers["缴税日期"], payment_date)
+        ledger_ws.cell(ledger_row, ledger_headers["实际缴税金额"], 15480)
+
+    workbook.save(path)
+    result = excel_com_open(path, save=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    calculated = openpyxl.load_workbook(path, data_only=True)
+    ledger = calculated["分期缴税台账"]
+    assert ledger.cell(2, ledger_headers["离职日期"]).value is None
+    assert ledger.cell(2, ledger_headers["校验"]).value == "正常"
+    assert ledger.cell(3, ledger_headers["校验"]).value == "正常"
+    assert ledger.cell(4, ledger_headers["校验"]).value == "异常：离职后缴税"
 
 
 def test_other_equity_income_requires_only_other_income_fields(workbook):
